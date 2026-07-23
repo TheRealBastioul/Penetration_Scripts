@@ -1,12 +1,28 @@
 # Penetration Scripts
 
-Custom tools built for penetration testing and web application security.
+Custom tools built for penetration testing and web application security. Each script targets a specific vulnerability class mapped to the OWASP Top 10:2025.
+
+---
+
+## OWASP Top 10:2025 Mapping
+
+| Script | OWASP Top 10:2025 | Vulnerability Class |
+|---|---|---|
+| [JWTCreator](#jwtcreator) | A07 — Authentication Failures | JWT forgery, decoding, and alg=none signature bypass |
+| [lsuck.py](#lsuckpy) | A05 — Injection | Blind LDAP injection, character by character extraction |
+| [nosqlbrute.py](#nosqlbrutepy) | A05 — Injection | NoSQL regex injection used to brute force credentials |
+| [pWar.py](#pwarpy) | A07 — Authentication Failures | Targeted credential wordlist generation |
+| [reconinject](#reconinject) | A05 — Injection | Automated fuzzing to detect injection points across forms and APIs |
+
+The 2025 list replaced the 2021 version in January 2026. A07:2025 (Authentication Failures) was A07:2021 (Identification and Authentication Failures) under the old naming, and A05:2025 (Injection) was A03:2021 under the old numbering. Reference: [owasp.org/Top10/2025](https://owasp.org/Top10/2025/)
 
 ---
 
 ## JWTCreator
 
-Decodes an existing JWT into its header and payload, or encodes a new JWT from a JSON payload with HMAC-SHA256 signing, or alg=none. Used for manual JWT forgery and inspection when testing token validation logic on a target app.
+**OWASP Top 10:2025: A07 — Authentication Failures**
+
+Decodes an existing JWT into its header and payload, or encodes a new JWT from a JSON payload with HMAC-SHA256 signing, or alg=none. Used for manual JWT forgery and inspection when testing token validation logic on a target app. The alg=none path specifically tests whether a server accepts unsigned tokens, a common broken authentication flaw.
 
 **Usage**
 
@@ -41,6 +57,8 @@ options:
 
 ## lsuck.py
 
+**OWASP Top 10:2025: A05 — Injection**
+
 The script's own description is "LDAP Injection via LSUCK anchor." It reads a raw .req HTTP request file, replaces the literal string LSUCK in the body with successive character guesses, and checks the response for a matching HTML tag, id, class, or text to confirm a hit. Used for character by character blind LDAP injection extraction.
 
 **Usage**
@@ -73,7 +91,9 @@ options:
 
 ## nosqlbrute.py
 
-Brute forces a login endpoint vulnerable to NoSQL regex injection, guessing the password one character at a time by watching for the absence of a known failure string. Used for credential extraction against MongoDB style regex injectable auth.
+**OWASP Top 10:2025: A05 — Injection**
+
+Brute forces a login endpoint vulnerable to NoSQL regex injection, guessing the password one character at a time by watching for the absence of a known failure string. Used for credential extraction against MongoDB style regex injectable auth. The root cause is unsanitized input reaching a NoSQL query operator, which also touches A07 Authentication Failures since the end result is a compromised login.
 
 **Usage**
 
@@ -81,7 +101,6 @@ Brute forces a login endpoint vulnerable to NoSQL regex injection, guessing the 
 python3 nosqlbrute.py -u http://10.66.146.113/login.php -un admin -pl 5 -f "err=1"
 python3 nosqlbrute.py -u http://10.66.146.113/login.php -un guest -f "Invalid"
 ```
-
 
 **Help output**
 
@@ -104,7 +123,9 @@ options:
 
 ## pWar.py
 
-Generates username and password wordlist variants from a first name, last name, keywords, and date of birth combinations, plus special character padding. Used for large scale, targeted credential wordlist generation against a specific person.
+**OWASP Top 10:2025: A07 — Authentication Failures**
+
+Generates username and password wordlist variants from a first name, last name, keywords, and date of birth combinations, plus special character padding. Used for large scale, targeted credential wordlist generation against a specific person. This supports testing whether an application's authentication layer permits weak or predictable credentials.
 
 **Usage**
 
@@ -117,11 +138,11 @@ python3 pWar.py -f John -l Doe -sa 2 -v
 
 ```
     __        ___    ____  
- _ _\ \      / / \  |  _ \ 
+ _ _\ \      / / \  |  _ \
 | '_ \ \ /\ / / _ \ | |_) |
-| |_) \ V  V / ___ \|  _ < 
+| |_) \ V  V / ___ \|  _ <
 | .__/ \_/\_/_/   \_\_| \_\
-|_|                        
+|_|  
 this is war
 
 by TheRealBastioul
@@ -157,10 +178,11 @@ options:
               by default, can slow down very large runs.
 ```
 
-
 ---
 
 ## reconinject
+
+**OWASP Top 10:2025: A05 — Injection**
 
 Modular injection fuzzer for form fields and JSON or AJAX endpoints. Sends payloads from an internal payload map against a target parameter and flags anomalous responses such as timeouts, redirects, or length changes. Used for automated detection of injection points across form and API targets.
 
@@ -171,7 +193,6 @@ python3 reconinject -u http://target.com/login.php -d "mail=test&pass=test" -san
 python3 reconinject -u http://target.com/functions.php -d "username=t&pass=t&function=login" --json --preset AJAX
 python3 reconinject -u http://target.com/login.php -d "mail=t&pass=t" --no-follow
 ```
-
 
 **Help output**
 
@@ -196,11 +217,12 @@ options:
   --preset PRESET       Presets: AJAX
   -t TEST_TYPE, --test-type TEST_TYPE
   -sanity               Try encoding variants (Form mode only)
-  --testsanity          Run character reflection test
+  --testsanity           Run character reflection test
   --proxy PROXY
   --no-follow           Do not follow redirects
 ```
 
+---
 
 ## Disclaimer
 
